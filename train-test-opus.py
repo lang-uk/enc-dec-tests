@@ -1,39 +1,39 @@
 """
-Fine-tuning and evaluation scripts for NLLB model on English-Ukrainian translation.
+Fine-tuning and evaluation scripts for OpusMT model on English-Ukrainian translation.
 Supports bidirectional training and evaluation using SacreBLEU metrics.
 
 This script provides functionality for:
 - Loading and preprocessing parallel corpora from jsonlines files
-- Fine-tuning NLLB model for machine translation
-- Evaluating translation quality using SacreBLEU
+- Fine-tuning OpusMT model for machine translation
+- Evaluating translation quality using SacreBLEU and FLORES
 """
 
 import json
 import argparse
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from smart_open import open
 import torch
 from transformers import (
-    NllbTokenizer,
+    MarianTokenizer,
     AutoModelForSeq2SeqLM,
     Seq2SeqTrainingArguments,
     Seq2SeqTrainer,
     DataCollatorForSeq2Seq,
 )
+import pandas as pd
 import sacrebleu
 from datasets import Dataset as HFDataset, load_dataset
 import wandb
 from tqdm.auto import tqdm
 
-
 # Constants
-# MODEL_NAME = "facebook/nllb-200-3.3B"
-MODEL_NAME = "facebook/nllb-200-distilled-600M"
+MODEL_NAME = "Helsinki-NLP/opus-mt-tc-big-en-zle"
+WANDB_PROJECT = "opus-finetune"
 
 
 def prepare_dataset(
     examples: Dict,
-    tokenizer: NllbTokenizer,
+    tokenizer: MarianTokenizer,
     max_length: int,
     source_lang: str,
     target_lang: str,
@@ -43,7 +43,7 @@ def prepare_dataset(
 
     Args:
         examples: Dictionary containing source and target texts
-        tokenizer: NLLB tokenizer instance
+        tokenizer: OpusMT tokenizer instance
         max_length: Maximum sequence length for tokenization
         source_lang: Source language code
         target_lang: Target language code
@@ -51,17 +51,18 @@ def prepare_dataset(
     Returns:
         Dictionary containing tokenized inputs and labels
     """
+    # Prepend target language token to source sentences
+    prefixed_sources = [f">>{target_lang}<< {src}" for src in examples["source"]]
+
     # Tokenize sources
-    tokenizer.src_lang = source_lang
     model_inputs = tokenizer(
-        examples["source"],
+        prefixed_sources,
         max_length=max_length,
         padding="max_length",
         truncation=True,
     )
 
     # Tokenize targets
-    tokenizer.src_lang = target_lang
     labels = tokenizer(
         examples["target"],
         max_length=max_length,
@@ -76,23 +77,23 @@ def prepare_dataset(
 def train_model(
     data_path: str,
     output_dir: str,
-    source_lang: str = "eng_Latn",
-    target_lang: str = "ukr_Cyrl",
+    source_lang: str = "eng",
+    target_lang: str = "ukr",
     batch_size: int = 8,
     num_epochs: int = 3,
-    learning_rate: float = 1e-4,
-    weight_decay: float = 1e-3,
+    learning_rate: float = 2e-5,
+    weight_decay: float = 0.01,
     max_length: int = 256,
-    wandb_project: Optional[str] = None,
+    wandb_project: Optional[str] = WANDB_PROJECT,
 ) -> None:
     """
-    Fine-tune NLLB model on the provided parallel corpus.
+    Fine-tune OpusMT model on the provided parallel corpus.
 
     Args:
         data_path: Path to jsonlines file containing parallel data
         output_dir: Directory to save the fine-tuned model
-        source_lang: Source language code
-        target_lang: Target language code
+        source_lang: Source language code (e.g., 'eng')
+        target_lang: Target language code (e.g., 'ukr')
         batch_size: Training batch size
         num_epochs: Number of training epochs
         learning_rate: Learning rate for optimization
@@ -117,7 +118,7 @@ def train_model(
         )
 
     # Load model and tokenizer
-    tokenizer = NllbTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = MarianTokenizer.from_pretrained(MODEL_NAME)
     model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
 
     # Load and preprocess the data
@@ -141,16 +142,14 @@ def train_model(
             "target_lang": target_lang,
         },
         batched=True,
-        num_proc=24,
     )
 
-    # Calculate total number of training steps per epoch
-    num_training_steps = (len(dataset) // batch_size)
+    # Calculate total number of training steps
+    num_training_steps = len(dataset) // batch_size
     num_warmup_steps = int(num_training_steps * 0.05)
     print(f"Total training steps per epoch: {num_training_steps}")
     print(f"Total warmup steps: {num_warmup_steps}")
     print(f"Total training steps: {num_training_steps * num_epochs}")
-
 
     # Training arguments
     training_args = Seq2SeqTrainingArguments(
@@ -160,8 +159,8 @@ def train_model(
         learning_rate=learning_rate,
         weight_decay=weight_decay,
         save_strategy="epoch",
-        save_total_limit=3,
-        gradient_accumulation_steps=8,
+        save_total_limit=2,
+        gradient_accumulation_steps=4,
         fp16=True,
         report_to="wandb" if wandb_project else "none",
         logging_steps=100,
@@ -193,8 +192,8 @@ def train_model(
 
 def evaluate_model(
     model_path: str,
-    source_lang: str = "eng_Latn",
-    target_lang: str = "ukr_Cyrl",
+    source_lang: str = "eng",
+    target_lang: str = "ukr",
     batch_size: int = 8,
     max_length: int = 256,
     num_beams: int = 10,
@@ -218,7 +217,7 @@ def evaluate_model(
         BLEU score
     """
     print(f"Loading model from {model_path}")
-    tokenizer = NllbTokenizer.from_pretrained(model_path)
+    tokenizer = MarianTokenizer.from_pretrained(model_path)
     model = AutoModelForSeq2SeqLM.from_pretrained(model_path)
     model.eval()
 
@@ -226,21 +225,23 @@ def evaluate_model(
         model = model.cuda()
         print("Using CUDA")
 
+    # Convert language codes for FLORES
+    flores_lang_map = {"eng": "eng_Latn", "ukr": "ukr_Cyrl"}
+    flores_source = flores_lang_map[source_lang]
+    flores_target = flores_lang_map[target_lang]
+
     print(f"Loading FLORES dataset ({decode_subset} split)")
     dataset = load_dataset(
-        "facebook/flores", f"{source_lang}-{target_lang}", trust_remote_code=True
+        "facebook/flores", f"{flores_source}-{flores_target}", trust_remote_code=True
     )[decode_subset]
 
     # Select required columns
-    columns = ["id", f"sentence_{source_lang}", f"sentence_{target_lang}"]
+    columns = ["id", f"sentence_{flores_source}", f"sentence_{flores_target}"]
     dataset = dataset.select_columns(columns)
 
     hypotheses = []
     references = []
     beam_outputs = []
-
-    # Get target language token id
-    target_lang_token = tokenizer.convert_tokens_to_ids(target_lang)
 
     # Calculate number of batches for progress bar
     num_batches = (len(dataset) + batch_size - 1) // batch_size
@@ -251,9 +252,13 @@ def evaluate_model(
     ):
         batch = dataset.select(range(i, min(i + batch_size, len(dataset))))
 
-        tokenizer.src_lang = source_lang
+        # Prepend target language token to source sentences
+        sources = [
+            f">>{target_lang}<< {src}" for src in batch[f"sentence_{flores_source}"]
+        ]
+
         inputs = tokenizer(
-            batch[f"sentence_{source_lang}"],
+            sources,
             max_length=max_length,
             padding=True,
             truncation=True,
@@ -266,7 +271,6 @@ def evaluate_model(
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                forced_bos_token_id=target_lang_token,
                 max_length=max_length,
                 num_beams=num_beams,
                 num_return_sequences=num_beams,
@@ -276,15 +280,12 @@ def evaluate_model(
 
         # Get sequences and scores
         sequences = outputs.sequences.reshape(len(batch), num_beams, -1)
-        if num_beams > 1:
-            scores = torch.exp(outputs.sequences_scores).reshape(len(batch), num_beams)
-        else:
-            scores = torch.ones(len(batch), 1)
+        scores = torch.exp(outputs.sequences_scores).reshape(len(batch), num_beams)
 
         # Process each example in the batch
         for idx in range(len(batch)):
             example_id = batch["id"][idx]
-            reference = batch[f"sentence_{target_lang}"][idx]
+            reference = batch[f"sentence_{flores_target}"][idx]
 
             # Decode all beams for this example
             beam_translations = []
@@ -299,7 +300,7 @@ def evaluate_model(
             beam_outputs.append(
                 {
                     "id": example_id,
-                    "source": batch[f"sentence_{source_lang}"][idx],
+                    "source": batch[f"sentence_{flores_source}"][idx],
                     "reference": reference,
                     "beams": beam_translations,
                 }
@@ -326,15 +327,11 @@ def parse_args() -> argparse.Namespace:
     Returns:
         Parsed command line arguments
     """
-    parser = argparse.ArgumentParser(description="Fine-tune and evaluate NLLB model")
+    parser = argparse.ArgumentParser(description="Fine-tune and evaluate OpusMT model")
 
     # Common arguments
-    parser.add_argument(
-        "--source-lang", default="eng_Latn", help="Source language code"
-    )
-    parser.add_argument(
-        "--target-lang", default="ukr_Cyrl", help="Target language code"
-    )
+    parser.add_argument("--source-lang", default="eng", help="Source language code")
+    parser.add_argument("--target-lang", default="ukr", help="Target language code")
     parser.add_argument(
         "--max-length", type=int, default=256, help="Maximum sequence length"
     )
@@ -357,7 +354,9 @@ def parse_args() -> argparse.Namespace:
     train_parser.add_argument(
         "--weight-decay", type=float, default=0.01, help="Weight decay"
     )
-    train_parser.add_argument("--wandb-project", help="Weights & Biases project name")
+    train_parser.add_argument(
+        "--wandb-project", default=WANDB_PROJECT, help="Weights & Biases project name"
+    )
 
     # Evaluation arguments
     eval_parser = subparsers.add_parser("eval", help="Evaluate the model")
