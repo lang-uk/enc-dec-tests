@@ -142,6 +142,7 @@ def train_model(
             "target_lang": target_lang,
         },
         batched=True,
+        num_proc=32,
     )
 
     # Calculate total number of training steps
