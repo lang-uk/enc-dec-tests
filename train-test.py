@@ -160,7 +160,7 @@ def train_model(
         learning_rate=learning_rate,
         weight_decay=weight_decay,
         save_strategy="epoch",
-        save_total_limit=3,
+        save_total_limit=num_epochs,
         gradient_accumulation_steps=8,
         fp16=True,
         report_to="wandb" if wandb_project else "none",

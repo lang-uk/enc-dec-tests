@@ -160,7 +160,7 @@ def train_model(
         learning_rate=learning_rate,
         weight_decay=weight_decay,
         save_strategy="epoch",
-        save_total_limit=2,
+        save_total_limit=num_epochs,
         gradient_accumulation_steps=4,
         fp16=True,
         report_to="wandb" if wandb_project else "none",
@@ -287,13 +287,15 @@ def evaluate_model(
         for idx in range(len(batch)):
             example_id = batch["id"][idx]
             reference = batch[f"sentence_{flores_target}"][idx]
+            source = batch[f"sentence_{flores_source}"][idx]
 
             # Decode all beams for this example
             beam_translations = []
             for beam_idx in range(num_beams):
-                translation = tokenizer.decode(
-                    sequences[idx, beam_idx], skip_special_tokens=True
-                )
+                # Get token IDs for this beam
+                beam_tokens = sequences[idx, beam_idx].cpu().numpy()
+                # Decode tokens to text
+                translation = tokenizer.decode(beam_tokens, skip_special_tokens=True)
                 score = scores[idx, beam_idx].item()
                 beam_translations.append({"translation": translation, "score": score})
 
@@ -301,7 +303,7 @@ def evaluate_model(
             beam_outputs.append(
                 {
                     "id": example_id,
-                    "source": batch[f"sentence_{flores_source}"][idx],
+                    "source": source,
                     "reference": reference,
                     "beams": beam_translations,
                 }
@@ -317,7 +319,22 @@ def evaluate_model(
             f.write(json.dumps(output, ensure_ascii=False) + "\n")
 
     # Calculate BLEU score
-    bleu = sacrebleu.corpus_bleu(hypotheses, [references])
+    bleu = sacrebleu.corpus_bleu(
+        hypotheses,
+        [references],
+        tokenize="13a",  # Use standard Moses tokenizer from sacrebleu
+    )
+
+    # Also calculate BLEU with different tokenizers for comparison
+    bleu_spm = sacrebleu.corpus_bleu(
+        hypotheses, [references], tokenize="spm"  # SentencePiece tokenizer
+    )
+
+    print(f"BLEU (Moses tokenizer): {bleu.score:.2f}")
+    print(f"BLEU (SentencePiece tokenizer): {bleu_spm.score:.2f}")
+    print("\nDetailed BLEU scores with Moses tokenizer:")
+    print(bleu.format())
+
     return bleu.score
 
 
