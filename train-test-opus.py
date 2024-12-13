@@ -54,23 +54,17 @@ def prepare_dataset(
     # Prepend target language token to source sentences
     prefixed_sources = [f">>{target_lang}<< {src}" for src in examples["source"]]
 
-    # Tokenize sources
-    model_inputs = tokenizer(
-        prefixed_sources,
+    # Prepare both source and target texts using prepare_seq2seq_batch
+    model_inputs = tokenizer.prepare_seq2seq_batch(
+        src_texts=prefixed_sources,
+        tgt_texts=examples["target"],
         max_length=max_length,
+        max_target_length=max_length,
         padding="max_length",
         truncation=True,
+        return_tensors=None,  # Return python lists for dataset mapping
     )
 
-    # Tokenize targets
-    labels = tokenizer(
-        examples["target"],
-        max_length=max_length,
-        padding="max_length",
-        truncation=True,
-    )
-
-    model_inputs["labels"] = labels["input_ids"]
     return model_inputs
 
 
