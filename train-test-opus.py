@@ -95,14 +95,6 @@ def prepare_dataset(
     return model_inputs
 
 
-class CustomTrainer(Seq2SeqTrainer):
-    """Custom trainer class to use our scheduler instead of default HuggingFace scheduler."""
-
-    def create_optimizer_and_scheduler(self, num_training_steps: int):
-        self.optimizer = self.optimizer
-        self.lr_scheduler = self.lr_scheduler
-
-
 def train_model(
     data_path: str,
     output_dir: str,
@@ -229,14 +221,18 @@ def train_model(
     # Initialize trainer
     data_collator = DataCollatorForSeq2Seq(tokenizer, model=model, padding=True)
 
+    # Custom Trainer class to use our scheduler
+    class CustomTrainer(Seq2SeqTrainer):
+        def create_optimizer_and_scheduler(self, num_training_steps: int):
+            self.optimizer = optimizer
+            self.lr_scheduler = scheduler
+
     trainer = CustomTrainer(
         model=model,
         args=training_args,
         train_dataset=dataset,
         data_collator=data_collator,
         tokenizer=tokenizer,
-        optimizer=optimizer,
-        lr_scheduler=scheduler,
     )
 
     # Train the model
