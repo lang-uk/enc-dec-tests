@@ -10,7 +10,8 @@ This script provides functionality for:
 
 import json
 import argparse
-from typing import Optional, Dict, List
+import math
+from typing import Optional, Dict
 from smart_open import open
 import torch
 from transformers import (
@@ -20,7 +21,7 @@ from transformers import (
     Seq2SeqTrainer,
     DataCollatorForSeq2Seq,
 )
-import pandas as pd
+
 import sacrebleu
 from datasets import Dataset as HFDataset, load_dataset
 import wandb
@@ -29,6 +30,29 @@ from tqdm.auto import tqdm
 # Constants
 MODEL_NAME = "Helsinki-NLP/opus-mt-tc-big-en-zle"
 WANDB_PROJECT = "opus-finetune"
+
+
+def get_inverse_square_root_schedule_with_warmup(
+    optimizer, num_warmup_steps: int, decay_start: int, last_epoch: int = -1
+):
+    """Create a schedule with inverse square root learning rate decay after warmup.
+
+    Args:
+        optimizer: The optimizer for which to schedule the learning rate
+        num_warmup_steps: The number of steps for linear warmup
+        decay_start: The step to start the inverse square root decay
+        last_epoch: The index of the last epoch
+
+    Returns:
+        A learning rate scheduler
+    """
+
+    def lr_lambda(current_step: int):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        return max(0.0, math.sqrt(decay_start / float(max(current_step, decay_start))))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
 def prepare_dataset(
@@ -65,7 +89,18 @@ def prepare_dataset(
         return_tensors=None,  # Return python lists for dataset mapping
     )
 
+    # Rename the target_ids to labels as expected by the model
+    model_inputs["labels"] = model_inputs["labels"]
+
     return model_inputs
+
+
+class CustomTrainer(Seq2SeqTrainer):
+    """Custom trainer class to use our scheduler instead of default HuggingFace scheduler."""
+
+    def create_optimizer_and_scheduler(self, num_training_steps: int):
+        self.optimizer = self.optimizer
+        self.lr_scheduler = self.lr_scheduler
 
 
 def train_model(
@@ -75,9 +110,12 @@ def train_model(
     target_lang: str = "ukr",
     batch_size: int = 8,
     num_epochs: int = 3,
-    learning_rate: float = 2e-5,
-    weight_decay: float = 0.01,
-    max_length: int = 256,
+    learning_rate: float = 3e-4,
+    beta1: float = 0.9,
+    beta2: float = 0.98,
+    epsilon: float = 1e-9,
+    max_grad_norm: float = 5.0,
+    max_length: int = 128,
     wandb_project: Optional[str] = WANDB_PROJECT,
 ) -> None:
     """
@@ -91,25 +129,13 @@ def train_model(
         batch_size: Training batch size
         num_epochs: Number of training epochs
         learning_rate: Learning rate for optimization
-        weight_decay: Weight decay for optimization
+        beta1: Adam beta1 parameter
+        beta2: Adam beta2 parameter
+        epsilon: Adam epsilon parameter
+        max_grad_norm: Maximum gradient norm for clipping
         max_length: Maximum sequence length
-        wandb_project: Weights & Biases project name (optional)
+        wandb_project: Weights & Biases project name
     """
-    # Initialize wandb if project name is provided
-    if wandb_project:
-        wandb.init(
-            project=wandb_project,
-            config={
-                "model": MODEL_NAME,
-                "source_lang": source_lang,
-                "target_lang": target_lang,
-                "batch_size": batch_size,
-                "num_epochs": num_epochs,
-                "learning_rate": learning_rate,
-                "weight_decay": weight_decay,
-                "max_length": max_length,
-            },
-        )
 
     # Load model and tokenizer
     tokenizer = MarianTokenizer.from_pretrained(MODEL_NAME)
@@ -146,33 +172,71 @@ def train_model(
     print(f"Total warmup steps: {num_warmup_steps}")
     print(f"Total training steps: {num_training_steps * num_epochs}")
 
-    # Training arguments
+    if wandb_project:
+        wandb.init(
+            project=wandb_project,
+            config={
+                "model": MODEL_NAME,
+                "source_lang": source_lang,
+                "target_lang": target_lang,
+                "batch_size": batch_size,
+                "num_epochs": num_epochs,
+                "learning_rate": learning_rate,
+                "warmup_steps": num_warmup_steps,
+                "decay_steps": num_warmup_steps,
+                "beta1": beta1,
+                "beta2": beta2,
+                "epsilon": epsilon,
+                "max_grad_norm": max_grad_norm,
+                "max_length": max_length,
+            },
+        )
+
+    # Training arguments with updated optimizer settings
     training_args = Seq2SeqTrainingArguments(
         output_dir=output_dir,
         num_train_epochs=num_epochs,
         per_device_train_batch_size=batch_size,
         learning_rate=learning_rate,
-        weight_decay=weight_decay,
         save_strategy="epoch",
         save_total_limit=num_epochs,
         gradient_accumulation_steps=4,
         fp16=True,
         report_to="wandb" if wandb_project else "none",
         logging_steps=100,
-        warmup_steps=num_warmup_steps,
+        max_grad_norm=max_grad_norm,
         remove_unused_columns=False,
         prediction_loss_only=True,
+        lr_scheduler_type="constant",
+        warmup_steps=0,
+    )
+
+    # Initialize optimizer
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=learning_rate,
+        betas=(beta1, beta2),
+        eps=epsilon,
+    )
+
+    # Create custom scheduler
+    scheduler = get_inverse_square_root_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=num_warmup_steps,
+        decay_start=num_warmup_steps,
     )
 
     # Initialize trainer
     data_collator = DataCollatorForSeq2Seq(tokenizer, model=model, padding=True)
 
-    trainer = Seq2SeqTrainer(
+    trainer = CustomTrainer(
         model=model,
         args=training_args,
         train_dataset=dataset,
         data_collator=data_collator,
         tokenizer=tokenizer,
+        optimizer=optimizer,
+        lr_scheduler=scheduler,
     )
 
     # Train the model
@@ -403,7 +467,10 @@ if __name__ == "__main__":
             batch_size=args.batch_size,
             num_epochs=args.num_epochs,
             learning_rate=args.learning_rate,
-            weight_decay=args.weight_decay,
+            beta1=args.beta1,
+            beta2=args.beta2,
+            epsilon=args.epsilon,
+            max_grad_norm=args.max_grad_norm,
             max_length=args.max_length,
             wandb_project=args.wandb_project,
         )
