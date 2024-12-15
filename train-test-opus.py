@@ -159,7 +159,8 @@ def train_model(
 
     # Calculate total number of training steps
     num_training_steps = len(dataset) // batch_size
-    num_warmup_steps = int(num_training_steps * 0.05)
+    # num_warmup_steps = int(num_training_steps * 0.05)
+    num_warmup_steps = 2000
     print(f"Total training steps per epoch: {num_training_steps}")
     print(f"Total warmup steps: {num_warmup_steps}")
     print(f"Total training steps: {num_training_steps * num_epochs}")
@@ -405,9 +406,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-lang", default="eng", help="Source language code")
     parser.add_argument("--target-lang", default="ukr", help="Target language code")
     parser.add_argument(
-        "--max-length", type=int, default=128, help="Maximum sequence length"
+        "--max-length", type=int, default=256, help="Maximum sequence length"
     )
-    parser.add_argument("--batch-size", type=int, default=8, help="Batch size")
+    parser.add_argument("--batch-size", type=int, default=32, help="Batch size")
 
     subparsers = parser.add_subparsers(dest="mode", help="Operation mode")
 
@@ -423,7 +424,7 @@ def parse_args() -> argparse.Namespace:
 
     # Learning rate and scheduler parameters
     train_parser.add_argument(
-        "--learning-rate", type=float, default=3e-4, help="Learning rate"
+        "--learning-rate", type=float, default=3e-5, help="Learning rate"
     )
 
     # Optimizer parameters
