@@ -409,7 +409,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-lang", default="eng", help="Source language code")
     parser.add_argument("--target-lang", default="ukr", help="Target language code")
     parser.add_argument(
-        "--max-length", type=int, default=256, help="Maximum sequence length"
+        "--max-length", type=int, default=128, help="Maximum sequence length"
     )
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size")
 
@@ -424,12 +424,29 @@ def parse_args() -> argparse.Namespace:
     train_parser.add_argument(
         "--num-epochs", type=int, default=3, help="Number of epochs"
     )
+
+    # Learning rate and scheduler parameters
     train_parser.add_argument(
-        "--learning-rate", type=float, default=2e-5, help="Learning rate"
+        "--learning-rate", type=float, default=3e-4, help="Learning rate"
+    )
+
+    # Optimizer parameters
+    train_parser.add_argument(
+        "--beta1", type=float, default=0.9, help="Adam beta1 parameter"
     )
     train_parser.add_argument(
-        "--weight-decay", type=float, default=0.01, help="Weight decay"
+        "--beta2", type=float, default=0.98, help="Adam beta2 parameter"
     )
+    train_parser.add_argument(
+        "--epsilon", type=float, default=1e-9, help="Adam epsilon parameter"
+    )
+    train_parser.add_argument(
+        "--max-grad-norm",
+        type=float,
+        default=5.0,
+        help="Maximum gradient norm for clipping",
+    )
+
     train_parser.add_argument(
         "--wandb-project", default=WANDB_PROJECT, help="Weights & Biases project name"
     )
