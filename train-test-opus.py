@@ -273,7 +273,6 @@ def train_model(
         adam_beta1=beta1,
         adam_beta2=beta2,
         adam_epsilon=epsilon,
-        max_grad_norm=max_grad_norm,
     )
 
     # # Initialize optimizer
