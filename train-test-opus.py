@@ -9,10 +9,15 @@ This script provides functionality for:
 """
 
 import json
+import random
 import argparse
-import math
-from typing import Optional, Dict
+from typing import Optional, Dict, List
+from pathlib import Path
+
+from pyaml import yaml
 from smart_open import open
+from tqdm.auto import tqdm
+
 import torch
 from transformers import (
     MarianTokenizer,
@@ -21,38 +26,106 @@ from transformers import (
     Seq2SeqTrainer,
     DataCollatorForSeq2Seq,
 )
-
 import sacrebleu
 from datasets import Dataset as HFDataset, load_dataset
 import wandb
-from tqdm.auto import tqdm
 
 # Constants
 MODEL_NAME = "Helsinki-NLP/opus-mt-tc-big-en-zle"
 WANDB_PROJECT = "opus-finetune"
 
 
-def get_inverse_square_root_schedule_with_warmup(
-    optimizer, num_warmup_steps: int, decay_start: int, last_epoch: int = -1
-):
-    """Create a schedule with inverse square root learning rate decay after warmup.
+# def get_inverse_square_root_schedule_with_warmup(
+#     optimizer, num_warmup_steps: int, decay_start: int, last_epoch: int = -1
+# ):
+#     """Create a schedule with inverse square root learning rate decay after warmup.
+
+#     Args:
+#         optimizer: The optimizer for which to schedule the learning rate
+#         num_warmup_steps: The number of steps for linear warmup
+#         decay_start: The step to start the inverse square root decay
+#         last_epoch: The index of the last epoch
+
+#     Returns:
+#         A learning rate scheduler
+#     """
+
+#     def lr_lambda(current_step: int):
+#         if current_step < num_warmup_steps:
+#             return float(current_step) / float(max(1, num_warmup_steps))
+#         return max(0.0, math.sqrt(decay_start / float(max(current_step, decay_start))))
+
+#     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
+
+
+def save_training_config(args: argparse.Namespace, output_dir: str) -> None:
+    """
+    Save training configuration to YAML file.
 
     Args:
-        optimizer: The optimizer for which to schedule the learning rate
-        num_warmup_steps: The number of steps for linear warmup
-        decay_start: The step to start the inverse square root decay
-        last_epoch: The index of the last epoch
-
+        args: Parsed command line arguments
+        output_dir: Directory to save the training configuration
     Returns:
-        A learning rate scheduler
+        None
     """
 
-    def lr_lambda(current_step: int):
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
-        return max(0.0, math.sqrt(decay_start / float(max(current_step, decay_start))))
+    config = vars(args)
+    output_path = Path(output_dir) / "training_config.yaml"
+    with open(output_path, "w", encoding="utf-8") as f:
+        yaml.dump(config, f, default_flow_style=False)
 
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
+
+def save_metrics(metrics: Dict, output_path: str) -> None:
+    """
+    Save evaluation metrics to JSON file.
+
+    Args:
+        metrics: Dictionary containing evaluation metrics
+        output_path: Path to save the metrics
+    Returns:
+        None
+    """
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2, ensure_ascii=False)
+
+
+def load_and_sort_data(
+    data_path: str, sort_mode: Optional[str] = None, seed: int = 42
+) -> List[Dict]:
+    """
+    Load and optionally sort the training data based on scores.
+
+    Args:
+        data_path: Path to jsonlines file containing parallel data
+        sort_mode: Sorting mode ('random', 'low-to-high', 'high-to-low', None)
+        seed: Random seed for shuffling
+
+    Returns:
+        List of dictionaries containing source and target texts
+    """
+    raw_data = []
+    with open(data_path, "r") as f:
+        for line in f:
+            data = json.loads(line)
+            raw_data.append(
+                {
+                    "source": data["src"],
+                    "target": data["mt"],
+                    "score": data.get("wmt23-cometkiwi-da-xxl_score", 0.0),
+                }
+            )
+
+    if sort_mode:
+        rng = random.Random(seed)
+        if sort_mode == "random":
+            rng.shuffle(raw_data)
+        elif sort_mode == "low-to-high":
+            raw_data.sort(key=lambda x: x["score"])
+        elif sort_mode == "high-to-low":
+            raw_data.sort(key=lambda x: x["score"], reverse=True)
+
+    return raw_data
 
 
 def prepare_dataset(
@@ -89,9 +162,6 @@ def prepare_dataset(
         return_tensors=None,  # Return python lists for dataset mapping
     )
 
-    # Rename the target_ids to labels as expected by the model
-    model_inputs["labels"] = model_inputs["labels"]
-
     return model_inputs
 
 
@@ -100,15 +170,16 @@ def train_model(
     output_dir: str,
     source_lang: str = "eng",
     target_lang: str = "ukr",
-    batch_size: int = 8,
+    batch_size: int = 32,
     num_epochs: int = 3,
-    learning_rate: float = 3e-4,
+    learning_rate: float = 3e-5,
     beta1: float = 0.9,
     beta2: float = 0.98,
     epsilon: float = 1e-9,
     max_grad_norm: float = 5.0,
-    max_length: int = 128,
+    max_length: int = 256,
     wandb_project: Optional[str] = WANDB_PROJECT,
+    sort_mode: Optional[str] = None,
 ) -> None:
     """
     Fine-tune OpusMT model on the provided parallel corpus.
@@ -127,6 +198,7 @@ def train_model(
         max_grad_norm: Maximum gradient norm for clipping
         max_length: Maximum sequence length
         wandb_project: Weights & Biases project name
+        sort_mode: Data sorting mode ('random', 'low-to-high', 'high-to-low', None)
     """
 
     # Load model and tokenizer
@@ -134,11 +206,7 @@ def train_model(
     model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
 
     # Load and preprocess the data
-    raw_data = []
-    with open(data_path, "r") as f:
-        for line in f:
-            data = json.loads(line)
-            raw_data.append({"source": data["src"], "target": data["mt"]})
+    raw_data = load_and_sort_data(data_path, sort_mode)
 
     # Convert to HuggingFace dataset format
     dataset = HFDataset.from_list(raw_data)
@@ -159,8 +227,8 @@ def train_model(
 
     # Calculate total number of training steps
     num_training_steps = len(dataset) // batch_size
-    # num_warmup_steps = int(num_training_steps * 0.05)
-    num_warmup_steps = 2000
+    num_warmup_steps = int(num_training_steps * num_epochs * 0.02)
+
     print(f"Total training steps per epoch: {num_training_steps}")
     print(f"Total warmup steps: {num_warmup_steps}")
     print(f"Total training steps: {num_training_steps * num_epochs}")
@@ -200,35 +268,39 @@ def train_model(
         max_grad_norm=max_grad_norm,
         remove_unused_columns=False,
         prediction_loss_only=True,
-        lr_scheduler_type="constant",
-        warmup_steps=0,
+        lr_scheduler_type="inverse_sqrt",
+        warmup_steps=num_warmup_steps,
+        adam_beta1=beta1,
+        adam_beta2=beta2,
+        adam_epsilon=epsilon,
+        max_grad_norm=max_grad_norm,
     )
 
-    # Initialize optimizer
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=learning_rate,
-        betas=(beta1, beta2),
-        eps=epsilon,
-    )
+    # # Initialize optimizer
+    # optimizer = torch.optim.Adam(
+    #     model.parameters(),
+    #     lr=learning_rate,
+    #     betas=(beta1, beta2),
+    #     eps=epsilon,
+    # )
 
-    # Create custom scheduler
-    scheduler = get_inverse_square_root_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=num_warmup_steps,
-        decay_start=num_warmup_steps,
-    )
+    # # Create custom scheduler
+    # scheduler = get_inverse_square_root_schedule_with_warmup(
+    #     optimizer,
+    #     num_warmup_steps=num_warmup_steps,
+    #     decay_start=num_warmup_steps,
+    # )
 
     # Initialize trainer
     data_collator = DataCollatorForSeq2Seq(tokenizer, model=model, padding=True)
 
     # Custom Trainer class to use our scheduler
-    class CustomTrainer(Seq2SeqTrainer):
-        def create_optimizer_and_scheduler(self, num_training_steps: int):
-            self.optimizer = optimizer
-            self.lr_scheduler = scheduler
+    # class CustomTrainer(Seq2SeqTrainer):
+    #     def create_optimizer_and_scheduler(self, num_training_steps: int):
+    #         self.optimizer = optimizer
+    #         self.lr_scheduler = scheduler
 
-    trainer = CustomTrainer(
+    trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
         train_dataset=dataset,
@@ -245,16 +317,90 @@ def train_model(
     if wandb_project:
         wandb.finish()
 
+    # Run evaluation after training
+    print("\nRunning post-training evaluation...")
+    metrics = evaluate_and_save_metrics(
+        model_path=str(output_dir),
+        source_lang=source_lang,
+        target_lang=target_lang,
+        batch_size=batch_size,
+        max_length=max_length,
+        num_beams=10,  # Default value for evaluation
+        decode_subset="dev",
+        output_dir=str(output_dir),
+    )
+    print(f"\nFinal BLEU score: {metrics['bleu_score']:.2f}")
+
+
+def evaluate_and_save_metrics(
+    model_path: str,
+    source_lang: str,
+    target_lang: str,
+    batch_size: int,
+    max_length: int,
+    num_beams: int,
+    decode_subset: str,
+    output_dir: str,
+) -> Dict:
+    """
+    Evaluate model and save comprehensive metrics.
+
+    Returns:
+        Dictionary containing all evaluation metrics
+    """
+    output_file = Path(output_dir) / f"beam_outputs_{decode_subset}.jsonl"
+    metrics_file = Path(output_dir) / f"metrics_{decode_subset}.json"
+
+    bleu_score = evaluate_model(
+        model_path=model_path,
+        source_lang=source_lang,
+        target_lang=target_lang,
+        batch_size=batch_size,
+        max_length=max_length,
+        num_beams=num_beams,
+        decode_subset=decode_subset,
+        output_file=str(output_file),
+    )
+
+    # Get detailed metrics from the latest evaluation
+    metrics = {
+        "bleu_score": bleu_score,
+        "bleu_details": {
+            "moses": {
+                "score": bleu_score,
+                "tokenizer": "13a",
+            },
+            "spm": {
+                "score": sacrebleu.corpus_bleu(
+                    hypotheses,  # This needs to be passed from evaluate_model
+                    [references],  # This needs to be passed from evaluate_model
+                    tokenize="spm",
+                ).score,
+                "tokenizer": "spm",
+            },
+        },
+        "dataset_split": decode_subset,
+        "model_path": model_path,
+        "parameters": {
+            "beam_size": num_beams,
+            "max_length": max_length,
+            "batch_size": batch_size,
+        },
+    }
+
+    save_metrics(metrics, metrics_file)
+    return metrics
+
 
 def evaluate_model(
     model_path: str,
+    output_dir: Path,
     source_lang: str = "eng",
     target_lang: str = "ukr",
     batch_size: int = 8,
     max_length: int = 256,
     num_beams: int = 10,
     decode_subset: str = "dev",
-    output_file: str = "beam_outputs.jsonl",
 ) -> float:
     """
     Evaluate the fine-tuned model using SacreBLEU on FLORES dataset.
@@ -272,14 +418,18 @@ def evaluate_model(
     Returns:
         BLEU score
     """
+
+    output_file = Path(output_dir) / f"beam_outputs_{decode_subset}.jsonl"
+    metrics_file = Path(output_dir) / f"metrics_{decode_subset}.json"
+
     print(f"Loading model from {model_path}")
+
     tokenizer = MarianTokenizer.from_pretrained(model_path)
     model = AutoModelForSeq2SeqLM.from_pretrained(model_path)
     model.eval()
 
     if torch.cuda.is_available():
         model = model.cuda()
-        print("Using CUDA")
 
     # Convert language codes for FLORES
     flores_lang_map = {"eng": "eng_Latn", "ukr": "ukr_Cyrl"}
@@ -390,6 +540,29 @@ def evaluate_model(
     print("\nDetailed BLEU scores with Moses tokenizer:")
     print(bleu.format())
 
+    metrics = {
+        "bleu_score": bleu.score,
+        "bleu_details": {
+            "moses": {
+                "score": bleu.score,
+                "tokenizer": "13a",
+            },
+            "spm": {
+                "score": bleu_spm.score,
+                "tokenizer": "spm",
+            },
+        },
+        "dataset_split": decode_subset,
+        "model_path": model_path,
+        "parameters": {
+            "beam_size": num_beams,
+            "max_length": max_length,
+            "batch_size": batch_size,
+        },
+    }
+
+    save_metrics(metrics, metrics_file)
+
     return bleu.score
 
 
@@ -420,6 +593,11 @@ def parse_args() -> argparse.Namespace:
     train_parser.add_argument("--output-dir", required=True, help="Output directory")
     train_parser.add_argument(
         "--num-epochs", type=int, default=3, help="Number of epochs"
+    )
+    train_parser.add_argument(
+        "--sort-mode",
+        choices=["random", "low-to-high", "high-to-low"],
+        help="Data sorting mode",
     )
 
     # Learning rate and scheduler parameters
@@ -463,7 +641,7 @@ def parse_args() -> argparse.Namespace:
         "--num-beams", type=int, default=10, help="Number of beams for beam search"
     )
     eval_parser.add_argument(
-        "--output-file", default="beam_outputs.jsonl", help="Path to save beam outputs"
+        "--output-dir", type=Path, help="Path to save beam outputs"
     )
 
     return parser.parse_args()
@@ -487,9 +665,11 @@ if __name__ == "__main__":
             max_grad_norm=args.max_grad_norm,
             max_length=args.max_length,
             wandb_project=args.wandb_project,
+            sort_mode=args.sort_mode,
         )
     elif args.mode == "eval":
         bleu_score = evaluate_model(
+            output_dir=args.output_dir,
             model_path=args.model_path,
             source_lang=args.source_lang,
             target_lang=args.target_lang,
@@ -497,6 +677,6 @@ if __name__ == "__main__":
             max_length=args.max_length,
             num_beams=args.num_beams,
             decode_subset=args.decode_subset,
-            output_file=args.output_file,
+            output_dir=args.output_dir,
         )
         print(f"BLEU Score: {bleu_score:.2f}")
