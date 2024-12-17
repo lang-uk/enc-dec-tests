@@ -14,7 +14,7 @@ import argparse
 from typing import Optional, Dict, List
 from pathlib import Path
 
-from pyaml import yaml
+import yaml
 from smart_open import open
 from tqdm.auto import tqdm
 
