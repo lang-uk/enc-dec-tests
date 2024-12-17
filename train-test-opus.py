@@ -676,6 +676,5 @@ if __name__ == "__main__":
             max_length=args.max_length,
             num_beams=args.num_beams,
             decode_subset=args.decode_subset,
-            output_dir=args.output_dir,
         )
         print(f"BLEU Score: {bleu_score:.2f}")
