@@ -35,29 +35,6 @@ MODEL_NAME = "Helsinki-NLP/opus-mt-tc-big-en-zle"
 WANDB_PROJECT = "opus-finetune"
 
 
-# def get_inverse_square_root_schedule_with_warmup(
-#     optimizer, num_warmup_steps: int, decay_start: int, last_epoch: int = -1
-# ):
-#     """Create a schedule with inverse square root learning rate decay after warmup.
-
-#     Args:
-#         optimizer: The optimizer for which to schedule the learning rate
-#         num_warmup_steps: The number of steps for linear warmup
-#         decay_start: The step to start the inverse square root decay
-#         last_epoch: The index of the last epoch
-
-#     Returns:
-#         A learning rate scheduler
-#     """
-
-#     def lr_lambda(current_step: int):
-#         if current_step < num_warmup_steps:
-#             return float(current_step) / float(max(1, num_warmup_steps))
-#         return max(0.0, math.sqrt(decay_start / float(max(current_step, decay_start))))
-
-#     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
-
-
 def save_training_config(args: argparse.Namespace, output_dir: str) -> None:
     """
     Save training configuration to YAML file.
@@ -275,29 +252,9 @@ def train_model(
         adam_epsilon=epsilon,
     )
 
-    # # Initialize optimizer
-    # optimizer = torch.optim.Adam(
-    #     model.parameters(),
-    #     lr=learning_rate,
-    #     betas=(beta1, beta2),
-    #     eps=epsilon,
-    # )
-
-    # # Create custom scheduler
-    # scheduler = get_inverse_square_root_schedule_with_warmup(
-    #     optimizer,
-    #     num_warmup_steps=num_warmup_steps,
-    #     decay_start=num_warmup_steps,
-    # )
 
     # Initialize trainer
     data_collator = DataCollatorForSeq2Seq(tokenizer, model=model, padding=True)
-
-    # Custom Trainer class to use our scheduler
-    # class CustomTrainer(Seq2SeqTrainer):
-    #     def create_optimizer_and_scheduler(self, num_training_steps: int):
-    #         self.optimizer = optimizer
-    #         self.lr_scheduler = scheduler
 
     trainer = Seq2SeqTrainer(
         model=model,
@@ -318,77 +275,16 @@ def train_model(
 
     # Run evaluation after training
     print("\nRunning post-training evaluation...")
-    metrics = evaluate_and_save_metrics(
+    evaluate_model(
         model_path=str(output_dir),
+        output_dir=output_dir,
         source_lang=source_lang,
         target_lang=target_lang,
         batch_size=batch_size,
         max_length=max_length,
         num_beams=10,  # Default value for evaluation
         decode_subset="dev",
-        output_dir=str(output_dir),
     )
-    print(f"\nFinal BLEU score: {metrics['bleu_score']:.2f}")
-
-
-def evaluate_and_save_metrics(
-    model_path: str,
-    source_lang: str,
-    target_lang: str,
-    batch_size: int,
-    max_length: int,
-    num_beams: int,
-    decode_subset: str,
-    output_dir: str,
-) -> Dict:
-    """
-    Evaluate model and save comprehensive metrics.
-
-    Returns:
-        Dictionary containing all evaluation metrics
-    """
-    output_file = Path(output_dir) / f"beam_outputs_{decode_subset}.jsonl"
-    metrics_file = Path(output_dir) / f"metrics_{decode_subset}.json"
-
-    bleu_score = evaluate_model(
-        model_path=model_path,
-        source_lang=source_lang,
-        target_lang=target_lang,
-        batch_size=batch_size,
-        max_length=max_length,
-        num_beams=num_beams,
-        decode_subset=decode_subset,
-        output_file=str(output_file),
-    )
-
-    # Get detailed metrics from the latest evaluation
-    metrics = {
-        "bleu_score": bleu_score,
-        "bleu_details": {
-            "moses": {
-                "score": bleu_score,
-                "tokenizer": "13a",
-            },
-            "spm": {
-                "score": sacrebleu.corpus_bleu(
-                    hypotheses,  # This needs to be passed from evaluate_model
-                    [references],  # This needs to be passed from evaluate_model
-                    tokenize="spm",
-                ).score,
-                "tokenizer": "spm",
-            },
-        },
-        "dataset_split": decode_subset,
-        "model_path": model_path,
-        "parameters": {
-            "beam_size": num_beams,
-            "max_length": max_length,
-            "batch_size": batch_size,
-        },
-    }
-
-    save_metrics(metrics, metrics_file)
-    return metrics
 
 
 def evaluate_model(
