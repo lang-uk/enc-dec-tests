@@ -9,11 +9,13 @@ from typing import Optional, Dict, List
 from pathlib import Path
 
 import yaml
-import smart_open
+from smart_open import open
 from tqdm.auto import tqdm
 import optuna
-
+from optuna.storages import RDBStorage
+from optuna.trial import TrialState
 import torch
+import os
 from transformers import (
     MarianTokenizer,
     MarianMTModel,
@@ -35,20 +37,20 @@ def save_training_config(args: argparse.Namespace, output_dir: str) -> None:
     """Save training configuration to YAML file."""
     config = vars(args)
     output_path = Path(output_dir) / "training_config.yaml"
-    with smart_open.open(output_path, "w", encoding="utf-8") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         yaml.dump(config, f, default_flow_style=False)
 
 
 def save_metrics(metrics: Dict, output_path: str) -> None:
     """Save evaluation metrics to JSON file."""
-    with smart_open.open(output_path, "w", encoding="utf-8") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2, ensure_ascii=False)
 
 
 def load_data(data_path: str) -> List[Dict]:
     """Load the training data from jsonlines file."""
     raw_data = []
-    with smart_open.open(data_path, "r") as f:
+    with open(data_path, "r") as f:
         for line in f:
             data = json.loads(line)
             raw_data.append({"source": data["en"], "target": data["uk"]})
@@ -94,7 +96,7 @@ def prepare_dataset(
 def objective(
     trial: optuna.Trial,
     train_dataset: HFDataset,
-    model: AutoModelForSeq2SeqLM,
+    model_name: str,
     tokenizer: MarianTokenizer,
     args: argparse.Namespace,
 ) -> float:
@@ -141,6 +143,11 @@ def objective(
         tokenizer=tokenizer,
     )
 
+    # Get GPU ID based on worker ID
+    gpu_id = trial.number % torch.cuda.device_count()
+    torch.cuda.set_device(gpu_id)
+    print(f"Running trial {trial.number} on GPU {gpu_id}")
+
     # Train and evaluate
     trainer.train()
 
@@ -173,7 +180,7 @@ def train_model(
     num_epochs: int = 3,
     learning_rate: float = 3e-5,
     beta1: float = 0.9,
-    beta2: float = 0.98,
+    beta2: float = 0.998,
     epsilon: float = 1e-9,
     max_grad_norm: float = 5.0,
     max_length: int = 256,
@@ -218,8 +225,18 @@ def train_model(
     if wandb_project:
         wandb.init(project=wandb_project)
 
-    # Create Optuna study
-    study = optuna.create_study(direction="maximize")
+    # Set up storage for parallel optimization
+    storage = RDBStorage(
+        "sqlite:///optuna_study.db", heartbeat_interval=60, grace_period=120
+    )
+
+    # Create Optuna study with storage
+    study = optuna.create_study(
+        study_name="opus_mt_optimization",
+        direction="maximize",
+        storage=storage,
+        load_if_exists=True,
+    )
 
     # Create args object for the objective function
     args = argparse.Namespace(
@@ -406,7 +423,7 @@ def evaluate_model(
             hypotheses.append(beam_translations[0]["translation"])
             references.append(reference)
 
-    with smart_open.open(output_file, "w", encoding="utf-8") as f:
+    with open(output_file, "w") as f:
         for output in beam_outputs:
             f.write(json.dumps(output, ensure_ascii=False) + "\n")
 
@@ -484,6 +501,21 @@ def parse_args() -> argparse.Namespace:
     )
     train_parser.add_argument(
         "--n-trials", type=int, default=20, help="Number of Optuna trials"
+    )
+    train_parser.add_argument(
+        "--n-jobs", type=int, default=1, help="Number of parallel jobs for Optuna"
+    )
+    train_parser.add_argument(
+        "--study-name",
+        type=str,
+        default="opus_mt_optimization",
+        help="Name for the Optuna study",
+    )
+    train_parser.add_argument(
+        "--storage",
+        type=str,
+        default="sqlite:///optuna_study.db",
+        help="Storage URL for Optuna database",
     )
 
     # Learning rate and optimizer parameters
