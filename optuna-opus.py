@@ -152,7 +152,8 @@ def objective(
     trainer.train()
 
     # Evaluate on dev set
-    model.eval()
+    trainer.save_model()
+
     bleu_score = evaluate_model(
         model_path=f"{args.output_dir}/trial_{trial.number}",
         output_dir=Path(args.output_dir),
@@ -219,7 +220,6 @@ def train_model(
         },
         batched=True,
         num_proc=32,
-        cache_file_name=f"{output_dir}/cached_dataset",
     )
 
     if wandb_project:
