@@ -96,7 +96,7 @@ def prepare_dataset(
 def objective(
     trial: optuna.Trial,
     train_dataset: HFDataset,
-    model_name: str,
+    model: AutoModelForSeq2SeqLM,
     tokenizer: MarianTokenizer,
     args: argparse.Namespace,
 ) -> float:
