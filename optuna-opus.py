@@ -206,7 +206,9 @@ def train_model(
     dataset = HFDataset.from_list(raw_data)
 
     # Filter long sequences
+    print(f"Dataset size before filtering: {len(dataset)}")
     dataset = filter_long_sequences(dataset, tokenizer, max_length)
+    print(f"Dataset size after filtering: {len(dataset)}")
 
     # Add tokenization with caching
     dataset = dataset.map(

@@ -7,6 +7,7 @@ for gpu_id in $(seq 1 $((NUM_GPUS))); do
         --output-dir ./exps/optuna \
         --n-trials 20 \
         --n-jobs 1 \
+        --num-epochs 1 \
         --storage "sqlite:///optuna_study.db" &
 done
 wait
