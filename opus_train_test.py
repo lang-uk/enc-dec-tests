@@ -21,6 +21,7 @@ from tqdm.auto import tqdm
 import torch
 from transformers import (
     MarianTokenizer,
+    MarianMTModel,
     AutoModelForSeq2SeqLM,
     Seq2SeqTrainingArguments,
     Seq2SeqTrainer,
@@ -159,6 +160,7 @@ def train_model(
     max_length: int = 256,
     wandb_project: Optional[str] = WANDB_PROJECT,
     sort_mode: Optional[str] = None,
+    from_scratch: bool = False,
 ) -> None:
     """
     Fine-tune OpusMT model on the provided parallel corpus.
@@ -182,7 +184,11 @@ def train_model(
 
     # Load model and tokenizer
     tokenizer = MarianTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
+    if from_scratch:
+        config = MarianMTModel.from_pretrained(MODEL_NAME).config
+        model = MarianMTModel(config)
+    else:
+        model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
 
     # Load and preprocess the data
     raw_data = load_and_sort_data(data_path, sort_mode)
@@ -535,6 +541,9 @@ def parse_args() -> argparse.Namespace:
         choices=["linear", "inverse_sqrt", "cosine", "cosine_with_restarts"],
         help="Learning rate scheduler",
     )
+    train_parser.add_argument(
+        "--from-scratch", action="store_true", help="Train model from scratch"
+    )
 
     # Evaluation arguments
     eval_parser = subparsers.add_parser("eval", help="Evaluate the model")
@@ -578,6 +587,7 @@ if __name__ == "__main__":
             sort_mode=args.sort_mode,
             scheduler=args.scheduler,
             warmup_ratio=args.warmup_ratio,
+            from_scratch=args.from_scratch,
         )
     elif args.mode == "eval":
         bleu_score = evaluate_model(
