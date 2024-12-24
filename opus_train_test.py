@@ -161,6 +161,7 @@ def train_model(
     wandb_project: Optional[str] = WANDB_PROJECT,
     sort_mode: Optional[str] = None,
     from_scratch: bool = False,
+    gradient_accumulation_steps: int = 4,
 ) -> None:
     """
     Fine-tune OpusMT model on the provided parallel corpus.
@@ -211,7 +212,7 @@ def train_model(
     )
 
     # Calculate total number of training steps
-    num_training_steps = len(dataset) // batch_size
+    num_training_steps = len(dataset) // (batch_size * gradient_accumulation_steps)
     num_warmup_steps = int(num_training_steps * num_epochs * warmup_ratio)
 
     print(f"Total training steps per epoch: {num_training_steps}")
@@ -246,7 +247,7 @@ def train_model(
         learning_rate=learning_rate,
         save_strategy="epoch",
         save_total_limit=num_epochs,
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=gradient_accumulation_steps,
         fp16=True,
         report_to="wandb" if wandb_project else "none",
         logging_steps=100,
@@ -287,7 +288,7 @@ def train_model(
         output_dir=output_dir,
         source_lang=source_lang,
         target_lang=target_lang,
-        batch_size=batch_size,
+        batch_size=1,
         max_length=max_length,
         num_beams=10,  # Default value for evaluation
         decode_subset="dev",
@@ -299,7 +300,7 @@ def evaluate_model(
     output_dir: Path,
     source_lang: str = "eng",
     target_lang: str = "ukr",
-    batch_size: int = 8,
+    batch_size: int = 1,
     max_length: int = 256,
     num_beams: int = 10,
     decode_subset: str = "dev",
